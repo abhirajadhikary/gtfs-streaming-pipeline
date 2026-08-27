@@ -1,5 +1,3 @@
-version: '3.8'
-
 networks:
   gtfs-network:
     driver: bridge
@@ -153,3 +151,74 @@ services:
       - gtfs-network
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Realtime serving
+  # ---------------------------------------------------------------------------
+  serving-consumer:
+    image: python:3.11-slim
+    container_name: gtfs-serving-consumer
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir redis kafka-python-ng &&
+      python -m serving.realtime.consumer"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    image: python:3.11-slim
+    container_name: gtfs-serving-api
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir redis fastapi 'uvicorn[standard]' &&
+      uvicorn serving.realtime.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    image: python:3.11-slim
+    container_name: gtfs-serving-dashboard
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir streamlit requests pandas &&
+      streamlit run serving/realtime/dashboard.py --server.address 0.0.0.0 --server.port 8501"
+    environment:
+      API_BASE: http://api:8000/api
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
