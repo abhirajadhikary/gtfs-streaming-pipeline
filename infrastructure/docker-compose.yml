@@ -1,0 +1,224 @@
+networks:
+  gtfs-network:
+    driver: bridge
+
+services:
+  # ---------------------------------------------------------------------------
+  # Apache Kafka (KRaft Mode)
+  # ---------------------------------------------------------------------------
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: gtfs-kafka
+    networks:
+      - gtfs-network
+    ports:
+      - "9092:9092"
+      - "9093:9093"
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_LISTENERS: 'PLAINTEXT://0.0.0.0:29092,CONTROLLER://0.0.0.0:29093,PLAINTEXT_HOST://0.0.0.0:9092'
+      KAFKA_INTER_BROKER_LISTENER_NAME: 'PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_LOG_DIRS: '/tmp/kraft-combined-logs'
+      CLUSTER_ID: 'MkU3OEVBNTcwNTJENDM2Qk'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:29093'
+
+  # ---------------------------------------------------------------------------
+  # Kafka UI
+  # ---------------------------------------------------------------------------
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: gtfs-kafka-ui
+    networks:
+      - gtfs-network
+    ports:
+      - "8080:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local-cluster
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      - kafka
+
+  # ---------------------------------------------------------------------------
+  # MinIO (S3 Lakehouse Storage)
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2024-01-16T16-07-38Z
+    container_name: gtfs-minio
+    networks:
+      - gtfs-network
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: server /data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/9000"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+  create-buckets:
+    image: minio/mc:RELEASE.2024-01-16T16-06-34Z
+    container_name: gtfs-minio-setup
+    networks:
+      - gtfs-network
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      /usr/bin/mc mb --ignore-existing myminio/${DELTA_BUCKET_NAME:-gtfs-lakehouse};
+      exit 0;
+      "
+
+  # ---------------------------------------------------------------------------
+  # Apache Spark Master
+  # ---------------------------------------------------------------------------
+  spark-master:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: gtfs-streaming-pipeline/spark:latest
+    container_name: gtfs-spark-master
+    networks:
+      - gtfs-network
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.master.Master"]
+    environment:
+      SPARK_MODE: master
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    ports:
+      - "8081:8080"   # Spark Master UI -> http://localhost:8081
+      - "7077:7077"   # Spark Master Submit
+    volumes:
+      - ../streaming:/opt/gtfs-pipeline/streaming
+      - ../ingestion:/opt/gtfs-pipeline/ingestion
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Apache Spark Worker
+  # ---------------------------------------------------------------------------
+  spark-worker-1:
+    build:
+      context: ./spark
+      dockerfile: Dockerfile
+    image: gtfs-streaming-pipeline/spark:latest
+    container_name: gtfs-spark-worker-1
+    networks:
+      - gtfs-network
+    command: ["/opt/spark/bin/spark-class", "org.apache.spark.deploy.worker.Worker", "spark://spark-master:7077"]
+    environment:
+      SPARK_MODE: worker
+      SPARK_WORKER_CORES: 2
+      SPARK_WORKER_MEMORY: 2g
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    depends_on:
+      spark-master:
+        condition: service_started
+    ports:
+      - "8082:8081"   # Worker 1 UI -> http://localhost:8082
+    volumes:
+      - ../streaming:/opt/gtfs-pipeline/streaming
+      - ../ingestion:/opt/gtfs-pipeline/ingestion
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------------------
+  # Redis Store
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7.2-alpine
+    container_name: gtfs-redis
+    networks:
+      - gtfs-network
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ---------------------------------------------------------------------------
+  # Realtime serving
+  # ---------------------------------------------------------------------------
+  serving-consumer:
+    image: python:3.11-slim
+    container_name: gtfs-serving-consumer
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir redis kafka-python-ng &&
+      python -m serving.realtime.consumer"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    depends_on:
+      kafka:
+        condition: service_started
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    image: python:3.11-slim
+    container_name: gtfs-serving-api
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir redis fastapi 'uvicorn[standard]' &&
+      uvicorn serving.realtime.main:app --host 0.0.0.0 --port 8000"
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+    ports:
+      - "8000:8000"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  dashboard:
+    image: python:3.11-slim
+    container_name: gtfs-serving-dashboard
+    networks:
+      - gtfs-network
+    working_dir: /opt/gtfs-pipeline
+    volumes:
+      - ..:/opt/gtfs-pipeline
+    command: >-
+      sh -c "pip install --disable-pip-version-check --no-cache-dir streamlit requests pandas &&
+      streamlit run serving/realtime/dashboard.py --server.address 0.0.0.0 --server.port 8501"
+    environment:
+      API_BASE: http://api:8000/api
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_started
+    restart: unless-stopped
