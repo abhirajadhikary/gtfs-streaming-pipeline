@@ -8,17 +8,22 @@ def get_spark_session(app_name: str = "GTFS Streaming Pipeline") -> SparkSession
 
     builder = (
         SparkSession.builder.appName(app_name)
-        .config("spark.master", "local[2]")
-        .config("spark.driver.memory", "512m")
-        .config("spark.executor.memory", "512m")
-        .config("spark.network.timeout", "600s")
-        .config("spark.executor.heartbeatInterval", "60s")
-        .config("spark.sql.shuffle.partitions", "2")
-        .config("spark.default.parallelism", "2")
+        .config("spark.master", "local[4]")
+        .config("spark.driver.memory", "2g")                  
+        .config("spark.executor.memory", "1g")
+        .config("spark.network.timeout", "800s")
+        .config("spark.ui.enabled", "false")                    
+        .config("spark.sql.shuffle.partitions", "4")
+        .config("spark.default.parallelism", "4")
+        .config("spark.sql.adaptive.enabled", "true")
+        .config("spark.databricks.delta.optimizeWrite.enabled", "true")
+        .config("spark.databricks.delta.autoCompact.enabled", "true")
         .config(
             "spark.jars.packages",
             "io.delta:delta-spark_2.12:3.1.0,"
-            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
+            "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,"
+            "org.apache.hadoop:hadoop-aws:3.3.4,"
+            "com.amazonaws:aws-java-sdk-bundle:1.12.262"
         )
         .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension")
         .config("spark.sql.catalog.spark_catalog", "org.apache.spark.sql.delta.catalog.DeltaCatalog")

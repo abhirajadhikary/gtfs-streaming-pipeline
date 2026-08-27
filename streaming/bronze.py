@@ -1,7 +1,7 @@
 import os
 import logging
+from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
-from streaming.utils import get_spark_session
 from streaming.consumer import GTFSKafkaConsumer
 
 logging.basicConfig(level=logging.INFO)
@@ -14,10 +14,8 @@ CHECKPOINT_BASE_PATH = f"s3a://{DELTA_BUCKET}/checkpoints/bronze"
 
 RAW_TOPICS = ["raw.vehicle_positions", "raw.trip_updates", "raw.service_alerts"]
 
-def run_bronze_pipeline():
-    spark = get_spark_session("GTFS-Bronze-Ingestion")
-    spark.sparkContext.setLogLevel("WARN")
 
+def run_bronze_pipeline(spark: SparkSession):
     logger.info("Starting Kafka to Bronze Streaming Pipeline")
 
     consumer = GTFSKafkaConsumer(spark, RAW_TOPICS)
@@ -31,12 +29,13 @@ def run_bronze_pipeline():
         F.col("offset"),
         F.col("timestamp").alias("kafka_timestamp"),
         F.current_timestamp().alias("ingestion_timestamp"),
-        F.date_format(F.current_timestamp(), "yyyy-MM-dd").alias("ingestion_date")
+        F.date_format(F.current_timestamp(), "yyyy-MM-dd").alias("ingestion_date"),
     )
 
     query = (
         bronze_df.writeStream.format("delta")
         .outputMode("append")
+        .trigger(processingTime="5 seconds")
         .partitionBy("topic", "ingestion_date")
         .option("checkpointLocation", f"{CHECKPOINT_BASE_PATH}/raw_topics")
         .option("path", BRONZE_BASE_PATH)
@@ -44,7 +43,4 @@ def run_bronze_pipeline():
     )
 
     logger.info(f"Bronze stream actively writing to {BRONZE_BASE_PATH}...")
-    query.awaitTermination()
-
-if __name__ == "__main__":
-    run_bronze_pipeline()
+    return query

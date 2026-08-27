@@ -25,5 +25,6 @@ class GTFSKafkaConsumer:
             .option("subscribe", ",".join(self.topics))
             .option("startingOffsets", "earliest")
             .option("failOnDataLoss", "false")
+            .option("maxOffsetsPerTrigger", "1000")
             .load()
         )
