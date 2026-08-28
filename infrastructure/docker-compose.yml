@@ -222,3 +222,33 @@ services:
       api:
         condition: service_started
     restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+
+  kafka-exporter:
+    image: danielqsj/kafka-exporter:latest
+    container_name: gtfs-kafka-exporter
+    command:
+      - "--kafka.server=gtfs-kafka:9092"
+    ports:
+      - "9308:9308"
+
+  redis-exporter:
+    image: oliver006/redis_exporter:latest
+    container_name: gtfs-redis-exporter
+    environment:
+      - REDIS_ADDR=redis://gtfs-redis:6379
+    ports:
+      - "9121:9121"
