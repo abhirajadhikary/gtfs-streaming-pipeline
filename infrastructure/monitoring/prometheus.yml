@@ -28,10 +28,4 @@ scrape_configs:
   - job_name: "fastapi_realtime"
     metrics_path: "/metrics"
     static_configs:
-      - targets: ["host.docker.internal:8000"]
-
-  # 6. Spark Structured Streaming Engine (if PrometheusServlet is configured)
-  - job_name: "spark"
-    metrics_path: "/metrics/prometheus"
-    static_configs:
-      - targets: ["host.docker.internal:4040"]
+      - targets: ["api:8000"]

@@ -1,8 +1,11 @@
 apiVersion: 1
 
-datasources:
-  - name: Prometheus
-    type: prometheus
-    access: proxy
-    url: http://prometheus:9090
-    isDefault: true
+providers:
+  - name: "GTFS Pipeline"
+    orgId: 1
+    folder: "GTFS"
+    type: file
+    disableDeletion: false
+    editable: true
+    options:
+      path: /etc/grafana/provisioning/dashboards
